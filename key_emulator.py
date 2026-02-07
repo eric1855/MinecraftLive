@@ -8,7 +8,8 @@ System Settings → Privacy & Security → Accessibility.
 import pyautogui
 
 # Disable pyautogui fail-safe (moving mouse to corner to abort) so it doesn't interfere
-pyautogui.FAILSAFE = True
+# NOTE: setting to False disables the emergency abort corner; set to True to re-enable
+pyautogui.FAILSAFE = False
 pyautogui.PAUSE = 0.02  # small delay between key actions for stability
 
 # Minecraft / FPS-style key names (pyautogui uses single-char or Key.xxx for special keys)
@@ -40,6 +41,7 @@ def key_down(key: str) -> None:
         _held.add(k)
     except Exception as e:
         print(f"[key_emulator] keyDown({k!r}) failed: {e}")
+        print("Hint: on macOS you may need to grant Terminal/Python Accessibility control in System Settings → Privacy & Security → Accessibility")
 
 
 def key_up(key: str) -> None:
@@ -52,6 +54,7 @@ def key_up(key: str) -> None:
             pyautogui.keyUp(k)
         except Exception as e:
             print(f"[key_emulator] keyUp({k!r}) failed: {e}")
+            print("Hint: on macOS you may need to grant Terminal/Python Accessibility control in System Settings → Privacy & Security → Accessibility")
         _held.discard(k)
 
 

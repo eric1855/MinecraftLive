@@ -3,6 +3,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
+import time
 from collections import deque
 
 from key_emulator import set_key, release_all
@@ -43,6 +44,15 @@ CONFIG = {
 
     # Key to hold while "running in place" is detected
     "running_key": "w",
+    # Running detection algorithm: "angle_alternate" = forearm/bicep angle alternation
+    "running_algo": "angle_alternate",
+    # Angle thresholds (degrees) for low/high elbow angle
+    "angle_low_deg": 30.0,
+    "angle_high_deg": 120.0,
+    # Time window (s) to consider opposing transitions paired
+    "angle_window_s": 1.0,
+    # Number of opposing pairs required within window to detect running
+    "angle_pair_count": 2,
 }
 # =============================================================================
 
@@ -58,6 +68,12 @@ options = PoseLandmarkerOptions(
 cap = cv2.VideoCapture(0)
 frame_count = 0
 
+# State for angle-alternation detection
+_left_transitions = deque()
+_right_transitions = deque()
+_last_left_region = None
+_last_right_region = None
+
 # Smoothing buffer: True = running detected this frame (start with not-running)
 _n = max(CONFIG["running_confirm_frames"], CONFIG["running_release_frames"])
 _running_buffer = deque([False] * _n, maxlen=_n)
@@ -69,6 +85,86 @@ def _detect_running_raw(landmarks) -> bool:
     """True if current frame looks like running (no smoothing)."""
     mode = CONFIG["running_mode"]
     cfg = CONFIG
+
+    algo = cfg.get("running_algo", "arms")
+    # Angle-alternation algorithm: look at elbow angle (shoulder-elbow-wrist)
+    if algo == "angle_alternate":
+        # helper: compute angle at elbow (in degrees)
+        def _angle_deg(a, b, c):
+            # a,b,c are landmarks with .x/.y
+            ax, ay = a.x, a.y
+            bx, by = b.x, b.y
+            cx, cy = c.x, c.y
+            v1 = (ax - bx, ay - by)
+            v2 = (cx - bx, cy - by)
+            dot = v1[0]*v2[0] + v1[1]*v2[1]
+            n1 = (v1[0]**2 + v1[1]**2) ** 0.5
+            n2 = (v2[0]**2 + v2[1]**2) ** 0.5
+            if n1 == 0 or n2 == 0:
+                return 0.0
+            cosv = max(-1.0, min(1.0, dot / (n1 * n2)))
+            import math
+            return math.degrees(math.acos(cosv))
+
+        now = time.time()
+        # landmark indices
+        ls, le, lw = landmarks[cfg["arm_left_shoulder"]], landmarks[cfg["arm_left_shoulder"]+2], landmarks[cfg["arm_left_wrist"]]
+        rs, re, rw = landmarks[cfg["arm_right_shoulder"]], landmarks[cfg["arm_right_shoulder"]+2], landmarks[cfg["arm_right_wrist"]]
+        # Note: using fixed offsets (shoulder+2 = elbow index) because of pose mapping
+        # Compute angles
+        left_angle = _angle_deg(ls, landmarks[cfg["arm_left_shoulder"]+1], lw) if False else _angle_deg(landmarks[cfg["arm_left_shoulder"]], landmarks[cfg["arm_left_shoulder"]+2], landmarks[cfg["arm_left_wrist"]])
+        right_angle = _angle_deg(landmarks[cfg["arm_right_shoulder"]], landmarks[cfg["arm_right_shoulder"]+2], landmarks[cfg["arm_right_wrist"]])
+
+        low = cfg.get("angle_low_deg", 30.0)
+        high = cfg.get("angle_high_deg", 120.0)
+
+        # classify region
+        def _region(angle):
+            if angle <= low:
+                return "low"
+            if angle >= high:
+                return "high"
+            return "mid"
+
+        global _last_left_region, _last_right_region
+        left_region = _region(left_angle)
+        right_region = _region(right_angle)
+
+        # record transitions
+        # left low->high => "L_up" ; left high->low => "L_down"
+        if _last_left_region and left_region != _last_left_region and left_region in ("low","high"):
+            direction = "up" if _last_left_region == "low" and left_region == "high" else ("down" if _last_left_region == "high" and left_region == "low" else None)
+            if direction:
+                _left_transitions.append((now, direction))
+        if _last_right_region and right_region != _last_right_region and right_region in ("low","high"):
+            direction = "up" if _last_right_region == "low" and right_region == "high" else ("down" if _last_right_region == "high" and right_region == "low" else None)
+            if direction:
+                _right_transitions.append((now, direction))
+
+        _last_left_region = left_region
+        _last_right_region = right_region
+
+        # prune old transitions
+        window = cfg.get("angle_window_s", 1.0)
+        cutoff = now - window
+        while _left_transitions and _left_transitions[0][0] < cutoff:
+            _left_transitions.popleft()
+        while _right_transitions and _right_transitions[0][0] < cutoff:
+            _right_transitions.popleft()
+
+        # Count opposing pairs: left up paired with right down (or left down with right up)
+        pairs = 0
+        for lt in list(_left_transitions):
+            for rt in list(_right_transitions):
+                if abs(lt[0] - rt[0]) <= window and lt[1] != rt[1]:
+                    pairs += 1
+        # require unique pairing (rough heuristic)
+        pairs = min(pairs, len(_left_transitions), len(_right_transitions))
+
+        if cfg.get("debug_print"):
+            print(f"[debug] left_angle={left_angle:.1f} right_angle={right_angle:.1f} left_reg={left_region} right_reg={right_region} pairs={pairs}")
+
+        return pairs >= cfg.get("angle_pair_count", 2)
 
     if mode in ("arms", "arms_or_legs"):
         # Arm pump: wrist above shoulder (smaller y = higher in image)
