@@ -33,10 +33,14 @@ CONFIG = {
     
     # CHANGED: You must pump both hands within 0.3s to start. 
     # This prevents accidental running when just reaching for clicks.
-    "start_switch_window_s": 0.3,  
+    "start_switch_window_s": 0.3, 
     
     # CHANGED: Reset counter faster so old movements don't linger
     "switch_count_reset_s": 0.5,
+
+    # tiff added for sprinting
+    "leg_sprint_threshold": 0.25, # Vertical distance between hip and knee
+    "sprint_release_frames": 15,  # Buffer to keep sprinting active while legs switch
 }
 # ====================================================================
 
@@ -113,6 +117,11 @@ _right_feedback_timer = 0.0
 _overlay_msg = ""
 _overlay_timer = 0.0
 
+#sprinting state 
+_is_sprinting = False
+_sprint_buffer = 0
+_was_sprinting_last_frame = False
+
 # Helpers
 def _update_switch(curr, last, which, now):
     global _last_left_switch_time, _last_right_switch_time, _last_any_switch_time
@@ -145,6 +154,9 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
         ret, frame = cap.read()
         if not ret: break
         
+        left_leg_lift = 1.0 
+        right_leg_lift = 1.0
+
         frame = cv2.flip(frame, 1)
         h, w_px = frame.shape[:2]
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -295,6 +307,21 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             
             prev_hip_y = avg_hip_y
 
+           # --- SPRINTING VIA LEG MOVEMENT ---
+            l_hip, r_hip = lm[23], lm[24]
+            l_knee, r_knee = lm[25], lm[26]
+            left_leg_lift = l_knee.y - l_hip.y
+            right_leg_lift = r_knee.y - r_hip.y
+
+            if left_leg_lift < CONFIG["leg_sprint_threshold"] or right_leg_lift < CONFIG["leg_sprint_threshold"]:
+                _is_sprinting = True
+                _sprint_buffer = CONFIG["sprint_release_frames"]
+            else:
+                if _sprint_buffer > 0:
+                    _sprint_buffer -= 1
+                else:
+                    _is_sprinting = False
+
             # --- VISUALS ---
             if now < _left_feedback_timer:
                 cv2.putText(frame, _left_feedback_text, (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
@@ -311,12 +338,51 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                 pct = min(1.0, (now - _right_raise_start_time)/hold_time)
                 cv2.rectangle(frame, (w_px-150, 200), (w_px-150+int(100*pct), 210), (0,255,255), -1)
 
-        _safe_set_key(CONFIG["running_key"], _running_holding, now)
+        # PASTE THE NEW KEYBOARD & UI LOGIC BLOCK STARTING HERE
+        from key_emulator import key_down, key_up, tap
+
+        # 1. Determine the status and color for the UI
+        if _running_holding:
+            if _is_sprinting:
+                status = "SPRINTING"
+                col = (0, 255, 255) 
+            else:
+                status = "WALKING"
+                col = (0, 255, 0)   
+        else:
+            status = "STOPPED"
+            col = (0, 0, 255)       
+        # 2. Execute Keyboard Actions
+        wants_to_sprint = _running_holding and _is_sprinting
+        if wants_to_sprint:
+            if not _was_sprinting_last_frame:
+                key_up(CONFIG["running_key"])    
+                time.sleep(0.02)
+                tap(CONFIG["running_key"], 0.05) 
+                time.sleep(0.05)
+                key_down(CONFIG["running_key"])  
+                _was_sprinting_last_frame = True
+            else:
+                set_key(CONFIG["running_key"], True)
+        elif _running_holding:
+            set_key(CONFIG["running_key"], True)
+            _was_sprinting_last_frame = False
+        else:
+            set_key(CONFIG["running_key"], False)
+            _was_sprinting_last_frame = False
+
+        # 3. Draw the Sprint Meter
+        current_lift = min(left_leg_lift, right_leg_lift)
+        target = CONFIG["leg_sprint_threshold"]
+        cv2.rectangle(frame, (w_px - 40, 300), (w_px - 20, 500), (50, 50, 50), -1)
+        fill_pct = np.clip((0.4 - current_lift) / (0.4 - target), 0, 1)
+        bar_color = (0, 255, 255) if _is_sprinting else (150, 150, 150)
+        cv2.rectangle(frame, (w_px - 40, 500), (w_px - 20, 500 - int(200 * fill_pct)), bar_color, -1)
         
-        status = "RUNNING" if _running_holding else "STOPPED"
-        col = (0, 255, 0) if _running_holding else (0, 0, 255)
+        # 4. Final Text Overlay
         cv2.putText(frame, f"Mode: {status}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, col, 2)
-        
+        set_key("shift", False)
+
         cv2.imshow('Action Recognition', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
 
