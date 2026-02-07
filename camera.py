@@ -9,39 +9,22 @@ from key_emulator import set_key, release_all
 
 # ============== TWEAKABLE CONFIG (adjust for your camera / pose) ==============
 CONFIG = {
-    # How we detect "running in place" (arms pumping vs legs)
-    # "arms" = at least one wrist above its shoulder (arm raised)
-    # "legs" = knee vertical offset from hip above threshold (leg bent)
-    # "arms_or_legs" = either condition
-    "running_mode": "arms",
+    # --- Running = hands moving in opposite directions for t > min time ---
+    # Landmark indices: 15=left wrist, 16=right wrist (MediaPipe pose)
+    "hand_left_wrist": 15,
+    "hand_right_wrist": 16,
+    # Frames of history used to compute "is this hand moving up or down?" (y in image)
+    "running_velocity_window_frames": 6,
+    # Minimum vertical motion (normalized y per frame) to count as "moving"
+    # Increase if noise triggers; decrease if real pumps are ignored
+    "running_min_velocity": 0.002,
+    # Running = opposite motion for at least this many consecutive frames (t > x)
+    # Higher = must pump longer before W engages; lower = quicker response
+    "running_opposite_direction_min_frames": 2,
 
-    # --- Arm-based running (shaking arms up/down) ---
-    # Landmark indices: 11=left shoulder, 12=right, 13=left elbow, 14=right, 15=left wrist, 16=right wrist
-    "arm_left_wrist": 15,
-    "arm_left_shoulder": 11,
-    "arm_right_wrist": 16,
-    "arm_right_shoulder": 12,
-    # Require BOTH arms to be "raised" (wrist above shoulder), or just one
-    "running_arms_require_both": False,
-    # Optional: wrist must be this much above shoulder (in normalized y; smaller y = higher)
-    # Set to 0 to use any "wrist above shoulder"
-    "arm_raise_margin": 0.0,
-
-    # --- Leg-based running (current knee/hip check) ---
-    # Landmarks: 23=left hip, 24=right hip, 25=left knee, 26=right knee
-    "leg_left_hip": 23,
-    "leg_left_knee": 25,
-    "leg_right_hip": 24,
-    "leg_right_knee": 26,
-    "leg_knee_hip_y_diff_threshold": 0.15,
-
-    # --- Smoothing (reduces jitter, makes W hold more stable) ---
-    # Number of consecutive frames that must show "running" before we press W
+    # --- Smoothing (reduces jitter after we've already decided "running") ---
     "running_confirm_frames": 2,
-    # Number of consecutive frames that must show "not running" before we release W
-    "running_release_frames": 3,
-
-    # Key to hold while "running in place" is detected
+    "running_release_frames": 30,
     "running_key": "w",
 }
 # =============================================================================
@@ -62,31 +45,48 @@ frame_count = 0
 _n = max(CONFIG["running_confirm_frames"], CONFIG["running_release_frames"])
 _running_buffer = deque([False] * _n, maxlen=_n)
 
+# Hand motion: recent y positions for velocity (smaller y = higher in image)
+_w = CONFIG["running_velocity_window_frames"] + 1
+_left_hand_ys: deque = deque(maxlen=_w)
+_right_hand_ys: deque = deque(maxlen=_w)
+_opposite_motion_streak: int = 0
+
 POSE_CONNECTIONS = [(0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),(9,10),(11,12),(11,13),(13,15),(15,17),(15,19),(15,21),(17,19),(12,14),(14,16),(16,18),(16,20),(16,22),(18,20),(11,23),(12,24),(23,24),(23,25),(24,26),(25,27),(26,28),(27,29),(28,30),(29,31),(30,32),(27,31),(28,32)]
 
 
 def _detect_running_raw(landmarks) -> bool:
-    """True if current frame looks like running (no smoothing)."""
-    mode = CONFIG["running_mode"]
+    """True when both hands are moving in opposite directions for >= min frames."""
+    global _opposite_motion_streak
     cfg = CONFIG
+    left_y = landmarks[cfg["hand_left_wrist"]].y
+    right_y = landmarks[cfg["hand_right_wrist"]].y
+    _left_hand_ys.append(left_y)
+    _right_hand_ys.append(right_y)
 
-    if mode in ("arms", "arms_or_legs"):
-        # Arm pump: wrist above shoulder (smaller y = higher in image)
-        left_raised = landmarks[cfg["arm_left_wrist"]].y + cfg["arm_raise_margin"] <= landmarks[cfg["arm_left_shoulder"]].y
-        right_raised = landmarks[cfg["arm_right_wrist"]].y + cfg["arm_raise_margin"] <= landmarks[cfg["arm_right_shoulder"]].y
-        arms_ok = (left_raised and right_raised) if cfg["running_arms_require_both"] else (left_raised or right_raised)
-        if mode == "arms":
-            return arms_ok
-        if arms_ok:
-            return True
+    min_vel = cfg["running_min_velocity"]
+    window = cfg["running_velocity_window_frames"]
+    min_frames = cfg["running_opposite_direction_min_frames"]
 
-    if mode in ("legs", "arms_or_legs"):
-        ly = abs(landmarks[cfg["leg_left_knee"]].y - landmarks[cfg["leg_left_hip"]].y)
-        ry = abs(landmarks[cfg["leg_right_knee"]].y - landmarks[cfg["leg_right_hip"]].y)
-        if ly > cfg["leg_knee_hip_y_diff_threshold"] or ry > cfg["leg_knee_hip_y_diff_threshold"]:
-            return True
+    if len(_left_hand_ys) <= window or len(_right_hand_ys) <= window:
+        _opposite_motion_streak = 0
+        return False
 
-    return False
+    # Velocity = (current - old) / span → positive = moving down in image, negative = up
+    left_vel = (_left_hand_ys[-1] - _left_hand_ys[-1 - window]) / window
+    right_vel = (_right_hand_ys[-1] - _right_hand_ys[-1 - window]) / window
+
+    # Opposite directions: one moving up, one moving down, both above noise
+    opposite = (
+        (left_vel * right_vel < 0)
+        and (abs(left_vel) >= min_vel)
+        and (abs(right_vel) >= min_vel)
+    )
+    if opposite:
+        _opposite_motion_streak = min(_opposite_motion_streak + 1, min_frames + 1)
+    else:
+        _opposite_motion_streak = 0
+
+    return _opposite_motion_streak >= min_frames
 
 
 def _running_after_smoothing(raw_running: bool) -> bool:
