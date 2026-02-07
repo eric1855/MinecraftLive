@@ -115,6 +115,9 @@ _last_left_pos = None
 _last_right_pos = None
 _last_move_time = None
 
+# Hand mouse control tuning
+HAND_DEADZONE = 0.12  # normalized half-size of central dead zone (0.0-0.5)
+CURSOR_SPEED_PX_PER_SEC = 800
 POSE_CONNECTIONS = [
     (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),(9,10),(11,12),(11,13),
     (13,15),(15,17),(15,19),(15,21),(17,19),(12,14),(14,16),(16,18),(16,20),
@@ -375,9 +378,11 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
         if hand_tracking_enabled and hand_results.hand_landmarks:
             hand_landmarks = hand_results.hand_landmarks[0]
 
+            # draw landmarks for feedback
             for landmark in hand_landmarks:
                 cv2.circle(frame, (int(landmark.x*w), int(landmark.y*h)), 5, (255,0,255), -1)
 
+            # fist click detection (unchanged)
             is_fist = _detect_fist(hand_landmarks)
             if is_fist and not prev_fist_state:
                 pyautogui.click()
@@ -388,25 +393,45 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                 )
             prev_fist_state = is_fist
 
-            wrist = hand_landmarks[0]
-            middle_tip = hand_landmarks[12]
-            dx = middle_tip.x - wrist.x
-            dy = middle_tip.y - wrist.y
+            # compute normalized hand centroid (use average of landmarks)
+            xs = [lm.x for lm in hand_landmarks]
+            ys = [lm.y for lm in hand_landmarks]
+            cx = float(sum(xs) / len(xs))
+            cy = float(sum(ys) / len(ys))
 
-            angle_x = np.clip(dx * 5, -1, 1)
-            angle_y = np.clip(dy * 5, -1, 1)
+            # draw centroid
+            cv2.circle(frame, (int(cx*w), int(cy*h)), 8, (0,255,255), -1)
 
-            target_x = (angle_x + 1) / 2 * screen_width
-            target_y = (angle_y + 1) / 2 * screen_height
+            # dead zone rectangle (centered)
+            dz = HAND_DEADZONE
+            tl = (int((0.5 - dz) * w), int((0.5 - dz) * h))
+            br = (int((0.5 + dz) * w), int((0.5 + dz) * h))
+            cv2.rectangle(frame, tl, br, (255,255,0), 1)
 
-            delta_x = (target_x - screen_width / 2) * 0.15
-            delta_y = (target_y - screen_height / 2) * 0.15
+            # time delta for constant-rate movement
+            now = time.time()
+            if _last_move_time is None:
+                dt = 0.0
+            else:
+                dt = max(0.0, now - _last_move_time)
+            _last_move_time = now
 
-            hand_delta_x = hand_delta_x * 0.1 + delta_x * 0.9
-            hand_delta_y = hand_delta_y * 0.1 + delta_y * 0.9
+            # determine directional movement based on dead zone
+            move_x = 0.0
+            move_y = 0.0
+            if cx < 0.5 - dz:
+                move_x = -CURSOR_SPEED_PX_PER_SEC * dt
+            elif cx > 0.5 + dz:
+                move_x = CURSOR_SPEED_PX_PER_SEC * dt
 
-            if abs(hand_delta_x) > 0.1 or abs(hand_delta_y) > 0.1:
-                pyautogui.moveRel(hand_delta_x, hand_delta_y, _pause=False)
+            if cy < 0.5 - dz:
+                move_y = -CURSOR_SPEED_PX_PER_SEC * dt
+            elif cy > 0.5 + dz:
+                move_y = CURSOR_SPEED_PX_PER_SEC * dt
+
+            # perform movement (small moves ignored)
+            if abs(move_x) >= 1.0 or abs(move_y) >= 1.0:
+                pyautogui.moveRel(int(move_x), int(move_y), _pause=False)
         else:
             hand_delta_x, hand_delta_y = 0.0, 0.0
 
