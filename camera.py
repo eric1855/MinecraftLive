@@ -40,17 +40,14 @@ CONFIG = {
     # CHANGED: Reset counter faster so old movements don't linger
     "switch_count_reset_s": 0.5,
 
-<<<<<<< HEAD
     # tiff added for sprinting
     "leg_sprint_threshold": 0.25, # Vertical distance between hip and knee
     "sprint_release_frames": 15,  # Buffer to keep sprinting active while legs switch
-=======
     # --- Head Tracking Config ---
     "head_turn_thresh_x": 0.04,
     "head_look_thresh_y": 0.03,
     "head_smooth_alpha": 0.5,
     "calib_frames_needed": 30,
->>>>>>> 01babea57894aa69785c6642c7fb29b5e884d3e8
 }
 # ====================================================================
 
