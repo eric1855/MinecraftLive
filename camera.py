@@ -5,7 +5,7 @@ from mediapipe.tasks.python import vision
 import numpy as np
 from collections import deque
 
-from key_emulator import set_key, release_all
+from key_emulator import set_key, release_all, tap
 
 # ============== TWEAKABLE CONFIG (adjust for your camera / pose) ==============
 CONFIG = {
@@ -43,6 +43,9 @@ CONFIG = {
 
     # Key to hold while "running in place" is detected
     "running_key": "w",
+    
+    # Key to press when T-Pose is detected
+    "tpose_key": "e",
 }
 # =============================================================================
 
@@ -57,6 +60,7 @@ options = PoseLandmarkerOptions(
 
 cap = cv2.VideoCapture(0)
 frame_count = 0
+prev_action = None
 
 # Smoothing buffer: True = running detected this frame (start with not-running)
 _n = max(CONFIG["running_confirm_frames"], CONFIG["running_release_frames"])
@@ -138,10 +142,6 @@ with PoseLandmarker.create_from_options(options) as landmarker:
                 action = "T-Pose"
             elif abs(landmarks[25].y - landmarks[23].y) > 0.15 or abs(landmarks[26].y - landmarks[24].y) > 0.15:
                 action = "Running in Place"
-        
-
-            if landmarks[15].y < landmarks[11].y and landmarks[16].y < landmarks[12].y:
-                action = "Gangnam Style"
             else:
                 running_raw = _detect_running_raw(landmarks)
                 if running_raw:
@@ -150,11 +150,20 @@ with PoseLandmarker.create_from_options(options) as landmarker:
         # Smooth and drive key: hold W while "running in place" is detected
         running_smoothed = _running_after_smoothing(running_raw)
         set_key(CONFIG["running_key"], running_smoothed)
+        
+        # Tap E once when entering T-Pose
+        if action == "T-Pose" and prev_action != "T-Pose":
+            try:
+                tap(CONFIG["tpose_key"])
+            except Exception:
+                pass
+        
+        prev_action = action
 
         cv2.putText(frame, action, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         cv2.imshow('Action Recognition', frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord('q')
             break
 
 cap.release()
