@@ -16,7 +16,7 @@ MINECRAFT_KEYS = {
     "forward": "w",
     "back": "s",
     "left": "a",
-    "right": "d",
+    "right": "d", 
     "jump": "space",
     "sneak": "shift",
     "sprint": "ctrl",
