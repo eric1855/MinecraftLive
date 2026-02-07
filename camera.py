@@ -43,8 +43,13 @@ with PoseLandmarker.create_from_options(options) as landmarker:
             for landmark in landmarks:
                 cv2.circle(frame, (int(landmark.x*w), int(landmark.y*h)), 3, (0,0,255), -1)
             
-            if landmarks[15].y < landmarks[11].y and landmarks[16].y < landmarks[12].y:
-                action = "Gangnam Style"
+            # T-pose detection: wrists extended horizontally near shoulder height
+            th_x = 0.12
+            th_y = 0.15
+
+            if (abs(landmarks[15].x - landmarks[11].x) > th_x and abs(landmarks[16].x - landmarks[12].x) > th_x and
+                    abs(landmarks[15].y - landmarks[11].y) < th_y and abs(landmarks[16].y - landmarks[12].y) < th_y):
+                action = "T-Pose"
             elif abs(landmarks[25].y - landmarks[23].y) > 0.15 or abs(landmarks[26].y - landmarks[24].y) > 0.15:
                 action = "Running in Place"
         
