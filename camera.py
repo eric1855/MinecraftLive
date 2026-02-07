@@ -163,7 +163,7 @@ with PoseLandmarker.create_from_options(options) as landmarker:
         cv2.putText(frame, action, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         cv2.imshow('Action Recognition', frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q')
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
 cap.release()
