@@ -55,7 +55,7 @@ def key_up(key: str) -> None:
         _held.discard(k)
 
 
-def tap(key: str, duration: float = 0.05) -> None:
+def tap(key: str, duration: float = 0.02) -> None:
     """Press and release a key (for one-off actions like jump)."""
     key_down(key)
     import time
