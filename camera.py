@@ -46,6 +46,9 @@ CONFIG = {
     
     # Key to press when T-Pose is detected
     "tpose_key": "e",
+    
+    # Key to press when jumping
+    "jump_key": "space",
 }
 # =============================================================================
 
@@ -61,6 +64,7 @@ options = PoseLandmarkerOptions(
 cap = cv2.VideoCapture(0)
 frame_count = 0
 prev_action = None
+prev_hip_y = None
 
 # Smoothing buffer: True = running detected this frame (start with not-running)
 _n = max(CONFIG["running_confirm_frames"], CONFIG["running_release_frames"])
@@ -136,8 +140,15 @@ with PoseLandmarker.create_from_options(options) as landmarker:
             # T-pose detection: wrists extended horizontally near shoulder height
             th_x = 0.12
             th_y = 0.15
-
-            if (abs(landmarks[15].x - landmarks[11].x) > th_x and abs(landmarks[16].x - landmarks[12].x) > th_x and
+            
+            # Track hip movement for jump detection
+            avg_hip_y = (landmarks[23].y + landmarks[24].y) / 2
+            
+            # Check for fast upward movement (jump)
+            if prev_hip_y is not None and (prev_hip_y - avg_hip_y) > 0.05:
+                action = "Jump"
+                print(f"Jump detected! Hip movement: {prev_hip_y - avg_hip_y:.4f}")
+            elif (abs(landmarks[15].x - landmarks[11].x) > th_x and abs(landmarks[16].x - landmarks[12].x) > th_x and
                     abs(landmarks[15].y - landmarks[11].y) < th_y and abs(landmarks[16].y - landmarks[12].y) < th_y):
                 action = "T-Pose"
             elif abs(landmarks[25].y - landmarks[23].y) > 0.15 or abs(landmarks[26].y - landmarks[24].y) > 0.15:
@@ -146,6 +157,8 @@ with PoseLandmarker.create_from_options(options) as landmarker:
                 running_raw = _detect_running_raw(landmarks)
                 if running_raw:
                     action = "Running in Place (W held)"
+            
+            prev_hip_y = avg_hip_y
 
         # Smooth and drive key: hold W while "running in place" is detected
         running_smoothed = _running_after_smoothing(running_raw)
@@ -157,6 +170,16 @@ with PoseLandmarker.create_from_options(options) as landmarker:
                 tap(CONFIG["tpose_key"])
             except Exception:
                 pass
+        
+        # Tap Space when jumping
+        if action == "Jump" and prev_action != "Jump":
+            print(f"Tapping space key (CONFIG['jump_key']={CONFIG['jump_key']})")
+            try:
+                tap(CONFIG["jump_key"])
+                print("Space tap sent successfully")
+            except Exception as e:
+                print(f"Error tapping space: {e}")
+    
         
         prev_action = action
 
