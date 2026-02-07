@@ -1,59 +1,67 @@
-import subprocess
-import os
-import signal
+import threading
+import time
+from pynput.mouse import Controller
 
-# Track the currently running AppleScript process
-_current_process = None
+# Mouse controller
+_mouse = Controller()
 
-def _start_loop(key_code):
-    """
-    Starts a background AppleScript process that batches key presses
-    to maximize speed.
-    """
-    global _current_process
-    stop_turning()
-    
-    # We repeat the 'key code' command multiple times inside the loop.
-    # This reduces the "loop overhead" significantly.
-    # We also REMOVED the 'delay' command entirely.
-    script = f"""
-    osascript -e '
-        tell application "System Events"
-            repeat 
-                delay(0.001)
-                key code {key_code}
-                key code {key_code}
-            end repeat
-        end tell
-    '
-    """
-    
-    _current_process = subprocess.Popen(
-        script, 
-        shell=True, 
-        preexec_fn=os.setsid,
-        stdout=subprocess.DEVNULL, 
-        stderr=subprocess.DEVNULL
-    )
+# Threaded smooth turning to avoid OS key spam
+_turn_thread = None
+_turn_stop = threading.Event()
+_turn_lock = threading.Lock()
+_turn_dir = 0  # -1 = left, +1 = right, 0 = idle
+
+# Tuning
+_step_px = 4
+_sleep_s = 0.01
+
+
+def _turn_worker():
+    while not _turn_stop.is_set():
+        with _turn_lock:
+            direction = _turn_dir
+        if direction != 0:
+            _mouse.move(direction * _step_px, 0)
+        time.sleep(_sleep_s)
+
+
+def _ensure_thread():
+    global _turn_thread
+    if _turn_thread is None or not _turn_thread.is_alive():
+        _turn_stop.clear()
+        _turn_thread = threading.Thread(target=_turn_worker, daemon=True)
+        _turn_thread.start()
+
 
 def start_left():
-    # 86 is Numpad 4 (Left) for Mouse Keys
-    _start_loop(86)
+    _ensure_thread()
+    with _turn_lock:
+        global _turn_dir
+        _turn_dir = -1
+
 
 def start_right():
-    # 88 is Numpad 6 (Right) for Mouse Keys
-    _start_loop(88)
+    _ensure_thread()
+    with _turn_lock:
+        global _turn_dir
+        _turn_dir = 1
+
 
 def stop_turning():
-    global _current_process
-    if _current_process:
+    with _turn_lock:
+        global _turn_dir
+        _turn_dir = 0
+
+
+def shutdown():
+    _turn_stop.set()
+    if _turn_thread is not None:
         try:
-            # Send SIGTERM to the process group to kill the AppleScript loop instantly
-            os.killpg(os.getpgid(_current_process.pid), signal.SIGTERM)
+            _turn_thread.join(timeout=0.5)
         except Exception:
             pass
-        _current_process = None
 
-# Compatibility wrapper (optional, does nothing now as we use start/stop)
+
+# Compatibility wrapper (optional)
 def send_key_code_once(key):
     pass
