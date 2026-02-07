@@ -3,6 +3,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
+import math
 from collections import deque
 import pyautogui
 import time
@@ -50,6 +51,8 @@ CONFIG = {
     "debug_print": False,
     # Click behavior: how far below shoulders counts as "low" for click conditions
     "click_low_margin": 0.08,
+    # Angle tolerance (degrees) used to detect fully straight arms (near 180°)
+    "arm_straight_tol_deg": 10,
 }
 # ====================================================================
 
@@ -208,6 +211,17 @@ def _check_no_movement(left_y, right_y, now) -> bool:
     return (now - _last_move_time) >= CONFIG["no_move_timeout_s"]
 
 
+def _elbow_angle_deg(shoulder, elbow, wrist) -> float:
+    """Return angle at the elbow in degrees between shoulder->elbow and wrist->elbow."""
+    v1 = np.array([shoulder.x - elbow.x, shoulder.y - elbow.y], dtype=float)
+    v2 = np.array([wrist.x - elbow.x, wrist.y - elbow.y], dtype=float)
+    norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+    if norm == 0:
+        return 0.0
+    cosv = np.clip(np.dot(v1, v2) / norm, -1.0, 1.0)
+    return math.degrees(math.acos(cosv))
+
+
 # =========================== MAIN LOOP ===========================
 
 with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
@@ -311,6 +325,32 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             else:
                 body_action = "None"
             prev_hip_y = avg_hip_y
+
+            # --- EMERGENCY STOP: both arms straight (near 180°) and DOWN ---
+            # Compute elbow angles and require wrists below shoulders (arms down)
+            left_elbow = landmarks[13]
+            right_elbow = landmarks[14]
+            left_elbow_ang = _elbow_angle_deg(ls, left_elbow, left_wrist)
+            right_elbow_ang = _elbow_angle_deg(rs, right_elbow, right_wrist)
+            tol = CONFIG.get("arm_straight_tol_deg", 10)
+            left_wrist_down = left_wrist.y > ls.y
+            right_wrist_down = right_wrist.y > rs.y
+            if (left_elbow_ang >= (180 - tol) and right_elbow_ang >= (180 - tol)
+                    and left_wrist_down and right_wrist_down):
+                # Immediately stop all inputs
+                release_all()
+                if _left_click_holding:
+                    try: pyautogui.mouseUp(button='left')
+                    except Exception: pass
+                    _left_click_holding = False
+                if _right_click_holding:
+                    try: pyautogui.mouseUp(button='right')
+                    except Exception: pass
+                    _right_click_holding = False
+                _running_holding = False
+                set_key(CONFIG["running_key"], False)
+                if CONFIG.get("debug_print"):
+                    print(f"[debug] Emergency stop: arms straight (L={left_elbow_ang:.1f}, R={right_elbow_ang:.1f}) and down -> released all")
 
             # --- 3) NEW RUNNING VIA SINGLE-LINE CROSSINGS ---
             now = time.time()
