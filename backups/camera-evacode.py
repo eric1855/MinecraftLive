@@ -7,8 +7,6 @@ import math
 import time
 from key_emulator import set_key, release_all
 from pynput.mouse import Button, Controller
-import threading
-import mouse_control
 
 # --- MAC MOUSE CONTROLLER ---
 mouse = Controller()
@@ -39,12 +37,6 @@ CONFIG = {
     
     # CHANGED: Reset counter faster so old movements don't linger
     "switch_count_reset_s": 0.5,
-
-    # --- Head Tracking Config ---
-    "head_turn_thresh_x": 0.04,
-    "head_look_thresh_y": 0.03,
-    "head_smooth_alpha": 0.5,
-    "calib_frames_needed": 30,
 }
 # ====================================================================
 
@@ -121,66 +113,6 @@ _right_feedback_timer = 0.0
 _overlay_msg = ""
 _overlay_timer = 0.0
 
-
-
-# Head Tracking Calibration
-calib_count = 0
-nose_x_samples = []
-nose_y_samples = []
-shoulder_mid_x_samples = []
-shoulder_mid_y_samples = []
-nose_minus_eye_y_samples = []
-
-# Head Tracking Runtime
-base_nose_x = 0.0
-base_nose_y = 0.0
-base_sh_x = 0.0
-base_sh_y = 0.0
-base_nose_minus_eye_y = 0.0
-smooth_head_x = 0.0
-smooth_head_y = 0.0
-
-
-# Previous head action to detect transitions
-_prev_head_action = None
-
-# Background worker control for continuous head-look actions
-_desired_head_action = None
-_desired_head_action = None
-_head_thread_stop = threading.Event()
-_head_thread = None
-
-
-
-
-def _head_action_worker():
-    """
-    Background worker: Monitors _desired_head_action.
-    Manages the persistent AppleScript process.
-    """
-    last_action = None
-
-    while not _head_thread_stop.is_set():
-        current_action = _desired_head_action
-        
-        # Only act if the desired action has CHANGED
-        if current_action != last_action:
-            if current_action == "Turn Right":
-                mouse_control.start_left()
-            elif current_action == "Turn Left":
-                mouse_control.start_right()
-            else:
-                # If neutral, forward, up, or down, stop lateral movement
-                mouse_control.stop_turning()
-            
-            last_action = current_action
-
-        # Check less frequently since we don't need to spam commands
-        time.sleep(0.01)
-
-    # Cleanup on exit
-    mouse_control.stop_turning()
-
 # Helpers
 def _update_switch(curr, last, which, now):
     global _last_left_switch_time, _last_right_switch_time, _last_any_switch_time
@@ -201,9 +133,6 @@ def _safe_set_key(key, pressed, now):
     try: set_key(key, pressed)
     except: pass
 
-
-_head_thread = threading.Thread(target=_head_action_worker, daemon=True)
-_head_thread.start()
 # =========================== MAIN LOOP ===========================
 with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
      HandLandmarker.create_from_options(hand_options) as hand_landmarker:
@@ -213,7 +142,6 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
     print("  - STOP RUN: Drop hands below Waist.")
 
     while cap.isOpened():
-        head_action = "No pose"
         ret, frame = cap.read()
         if not ret: break
         
@@ -234,56 +162,7 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             ls, rs = lm[11], lm[12]
             lw, rw = lm[15], lm[16]
             lh, rh = lm[23], lm[24] # Hips
-
-
-            # --- HEAD TRACKING ---
-            nose = lm[0]
-            shoulder_mid_x = (ls.x + rs.x) / 2.0
-            shoulder_mid_y = (ls.y + rs.y) / 2.0
-            eye_mid_y = (left_eye.y + right_eye.y) / 2.0
-
-            if calib_count < CONFIG["calib_frames_needed"]:
-                nose_x_samples.append(nose.x)
-                nose_y_samples.append(nose.y)
-                shoulder_mid_x_samples.append(shoulder_mid_x)
-                shoulder_mid_y_samples.append(shoulder_mid_y)
-                nose_minus_eye_y_samples.append(nose.y - eye_mid_y)
-                calib_count += 1
-                head_action = f"Calibrating {calib_count}/{CONFIG['calib_frames_needed']}"
-            else:
-                if calib_count == CONFIG["calib_frames_needed"]:
-                    base_nose_x = float(np.mean(nose_x_samples))
-                    base_nose_y = float(np.mean(nose_y_samples))
-                    base_sh_x = float(np.mean(shoulder_mid_x_samples))
-                    base_sh_y = float(np.mean(shoulder_mid_y_samples))
-                    base_nose_minus_eye_y = float(np.mean(nose_minus_eye_y_samples))
-                    calib_count += 1
-
-                rel_x = (nose.x - shoulder_mid_x) - (base_nose_x - base_sh_x)
-                rel_y = (nose.y - eye_mid_y) - base_nose_minus_eye_y
-
-                alpha = CONFIG["head_smooth_alpha"]
-                smooth_head_x = alpha * smooth_head_x + (1 - alpha) * rel_x
-                smooth_head_y = alpha * smooth_head_y + (1 - alpha) * rel_y
-
-                if smooth_head_y < -CONFIG["head_look_thresh_y"]: head_action = "Look Up"
-                elif smooth_head_y > CONFIG["head_look_thresh_y"]: head_action = "Look Down"
-                elif smooth_head_x > CONFIG["head_turn_thresh_x"]: head_action = "Turn Left"
-                elif smooth_head_x < -CONFIG["head_turn_thresh_x"]: head_action = "Turn Right"
-                else: head_action = "Forward"
             
-
-
-            # Update desired head action for the background worker (continuous behavior)
-            if head_action == "Turn Left":
-                _desired_head_action = "Turn Left"
-            elif head_action == "Turn Right":
-                _desired_head_action = "Turn Right"
-            else:
-                _desired_head_action = None
-            _prev_head_action = head_action
-
-
             # --- CALCULATE THRESHOLDS ---
             start_thresh_y = ((ls.y + rs.y) / 2.0) + CONFIG["run_start_offset"]
             stop_thresh_y = ((lh.y + rh.y) / 2.0) + CONFIG["run_stop_offset"]
@@ -440,16 +319,6 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
         
         cv2.imshow('Action Recognition', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
-
-
-
-_head_thread_stop.set()
-if _head_thread is not None:
-    try:
-        _head_thread.join(timeout=1.0)
-    except Exception:
-        pass
-
 
 cap.release()
 release_all()
