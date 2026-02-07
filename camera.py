@@ -8,6 +8,8 @@ from collections import deque
 import pyautogui
 import time
 from key_emulator import set_key, release_all, tap
+import mouse_control
+import threading
 
 # =========================== CONFIGURATION ===========================
 CONFIG = {
@@ -15,9 +17,9 @@ CONFIG = {
     "running_key": "w",
     "left_up": 0.50,   # normalized Y threshold for LEFT wrist
     "right_up": 0.50,  # normalized Y threshold for RIGHT wrist
-
+ 
     # Run Detection Tuning
-    "switches_required": 3,        # how many up/down switches per hand required to start running
+    "switches_required": 3,         # how many up/down switches per hand required to start running
     "start_switch_window_s": 0.8,  # both hands' last switches must be within this window to trigger
     "switch_count_reset_s": 1.2,   # if no switches occur for this long, reset per-hand counters
     "stop_no_switch_s": 2.0,       # stop running if no crossings for this long
@@ -31,11 +33,11 @@ CONFIG = {
     "jump_key": "space",
 
     # --- Head Tracking Config ---
-    "head_turn_thresh_x": 0.03,
+    "head_turn_thresh_x": 0.04,
     "head_look_thresh_y": 0.03,
-    "head_smooth_alpha": 0.85,
+    "head_smooth_alpha": 0.5,
     "calib_frames_needed": 30,
-
+  
     # --- Visuals / debug ---
     "draw_zone_lines": True,
     "debug_print": False,
@@ -99,6 +101,44 @@ base_sh_y = 0.0
 base_nose_minus_eye_y = 0.0
 smooth_head_x = 0.0
 smooth_head_y = 0.0
+
+# Previous head action to detect transitions
+_prev_head_action = None
+
+# Background worker control for continuous head-look actions
+_desired_head_action = None
+_desired_head_action = None
+_head_thread_stop = threading.Event()
+_head_thread = None
+
+
+def _head_action_worker():
+    """
+    Background worker: Monitors _desired_head_action.
+    Manages the persistent AppleScript process.
+    """
+    last_action = None
+
+    while not _head_thread_stop.is_set():
+        current_action = _desired_head_action
+        
+        # Only act if the desired action has CHANGED
+        if current_action != last_action:
+            if current_action == "Turn Right":
+                mouse_control.start_left()
+            elif current_action == "Turn Left":
+                mouse_control.start_right()
+            else:
+                # If neutral, forward, up, or down, stop lateral movement
+                mouse_control.stop_turning()
+            
+            last_action = current_action
+
+        # Check less frequently since we don't need to spam commands
+        time.sleep(0.01)
+
+    # Cleanup on exit
+    mouse_control.stop_turning()
 
 # ---- RUNNING STATE ----
 _running_holding = False
@@ -221,8 +261,11 @@ def _safe_set_key(key: str, pressed: bool, now: float = None):
 
 # =========================== MAIN LOOP ===========================
 
+_head_thread = threading.Thread(target=_head_action_worker, daemon=True)
+_head_thread.start()
+
 with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
-     HandLandmarker.create_from_options(hand_options) as hand_landmarker:
+    HandLandmarker.create_from_options(hand_options) as hand_landmarker:
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -463,7 +506,7 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
 
         # ---------------- KEYBOARD OUTPUT ----------------
         # Use safe set key to respect emergency stop
-        _safe_set_key(CONFIG["running_key"], _running_holding, now=now)
+        _safe_set_key(CONFIG["running_key"], _running_holding, now=time.time())
 
         if body_action == "T-Pose" and prev_action != "T-Pose":
             tap(CONFIG["tpose_key"])
@@ -471,6 +514,15 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             tap(CONFIG["jump_key"])
 
         prev_action = body_action
+
+        # Update desired head action for the background worker (continuous behavior)
+        if head_action == "Turn Left":
+            _desired_head_action = "Turn Left"
+        elif head_action == "Turn Right":
+            _desired_head_action = "Turn Right"
+        else:
+            _desired_head_action = None
+        _prev_head_action = head_action
 
         # ---------------- MOUSE MOVEMENT ----------------
         if hand_tracking_enabled and hand_results.hand_landmarks:
@@ -497,6 +549,13 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
         cv2.imshow('Action Recognition', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
+
+_head_thread_stop.set()
+if _head_thread is not None:
+    try:
+        _head_thread.join(timeout=1.0)
+    except Exception:
+        pass
 
 cap.release()
 release_all()
