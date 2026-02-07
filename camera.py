@@ -48,8 +48,11 @@ CONFIG = {
     # --- Visuals / debug ---
     "draw_zone_lines": True,
     "debug_print": False,
+    # Click behavior: how far below shoulders counts as "low" for click conditions
+    "click_low_margin": 0.08,
 }
 # ====================================================================
+
 
 # =========================== INITIALIZATION ===========================
 BaseOptions = python.BaseOptions
@@ -114,6 +117,12 @@ _last_right_above = None
 _last_left_pos = None
 _last_right_pos = None
 _last_move_time = None
+_last_left_move_time = None
+_last_right_move_time = None
+
+# Click hold state
+_left_click_holding = False
+_right_click_holding = False
 
 POSE_CONNECTIONS = [
     (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),(9,10),(11,12),(11,13),
@@ -167,7 +176,7 @@ def _check_no_movement(left_y, right_y, now) -> bool:
     Returns True if both hands have been effectively still for no_move_timeout_s.
     Uses normalized y delta with no_move_threshold.
     """
-    global _last_left_pos, _last_right_pos, _last_move_time
+    global _last_left_pos, _last_right_pos, _last_move_time, _last_left_move_time, _last_right_move_time
 
     threshold = CONFIG["no_move_threshold"]
 
@@ -175,13 +184,19 @@ def _check_no_movement(left_y, right_y, now) -> bool:
         _last_left_pos = left_y
         _last_right_pos = right_y
         _last_move_time = now
+        _last_left_move_time = now
+        _last_right_move_time = now
         return False
 
     left_diff = abs(left_y - _last_left_pos)
     right_diff = abs(right_y - _last_right_pos)
 
     # If either hand moved beyond threshold -> update last move time
-    if left_diff > threshold or right_diff > threshold:
+    if left_diff > threshold:
+        _last_left_move_time = now
+        _last_move_time = now
+    if right_diff > threshold:
+        _last_right_move_time = now
         _last_move_time = now
 
     _last_left_pos = left_y
@@ -359,6 +374,51 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                 (255, 255, 255),
                 2
             )
+
+            # ---------------- CLICK-HOLD LOGIC ----------------
+            # Determine per-hand "not moving" using last-move timestamps
+            left_not_moving = False
+            right_not_moving = False
+            if _last_left_move_time is not None:
+                left_not_moving = (now - _last_left_move_time) >= CONFIG["no_move_timeout_s"]
+            if _last_right_move_time is not None:
+                right_not_moving = (now - _last_right_move_time) >= CONFIG["no_move_timeout_s"]
+
+            # Head reference: nose (higher = smaller y)
+            left_above_head = left_wrist_y < nose.y
+            right_above_head = right_wrist_y < nose.y
+
+            low_margin = CONFIG.get("click_low_margin", 0.08)
+            left_low = left_wrist_y > (shoulder_mid_y + low_margin)
+            right_low = right_wrist_y > (shoulder_mid_y + low_margin)
+
+            # Left-click hold: left hand above head AND right hand low and not moving
+            left_click_cond = left_above_head and right_low and right_not_moving
+            # Right-click hold: right hand above head AND left hand low and not moving
+            right_click_cond = right_above_head and left_low and left_not_moving
+
+            # Apply mouse down/up only on state changes
+            if left_click_cond and not _left_click_holding:
+                pyautogui.mouseDown(button='left')
+                _left_click_holding = True
+                if CONFIG["debug_print"]:
+                    print("[debug] LEFT mouseDown (left above, right low+still)")
+            if not left_click_cond and _left_click_holding:
+                pyautogui.mouseUp(button='left')
+                _left_click_holding = False
+                if CONFIG["debug_print"]:
+                    print("[debug] LEFT mouseUp")
+
+            if right_click_cond and not _right_click_holding:
+                pyautogui.mouseDown(button='right')
+                _right_click_holding = True
+                if CONFIG["debug_print"]:
+                    print("[debug] RIGHT mouseDown (right above, left low+still)")
+            if not right_click_cond and _right_click_holding:
+                pyautogui.mouseUp(button='right')
+                _right_click_holding = False
+                if CONFIG["debug_print"]:
+                    print("[debug] RIGHT mouseUp")
 
         # ---------------- KEYBOARD INPUT HANDLING ----------------
         # IMPORTANT: W is driven ONLY by _running_holding now
