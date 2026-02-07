@@ -6,6 +6,7 @@ import numpy as np
 import time
 import threading
 from pynput.mouse import Button, Controller
+import math
 
 # Import all key emulator functions needed
 from key_emulator import set_key, release_all, key_down, key_up, tap
@@ -34,13 +35,14 @@ CONFIG = {
 
     # --- RUNNING TIMING ---
     "switches_required": 1,
-    "start_switch_window_s": 0.0, # Tight window to prevent accidents
-    "switch_count_reset_s": 0.5,
-    "jump_threshold": 0.06, 
+    "start_switch_window_s": 0.5, # Tight window to prevent accidents
+    "switch_count_reset_s": 1.0,
+    "jump_threshold": 0.03, 
 
     # --- SPRINTING ---
-    "leg_sprint_threshold": 0.25, # Distance between hip and knee
-    "sprint_release_frames": 15,  # Buffer to keep sprinting active
+    "sprint_speed_threshold": 0.05,  # How fast hands must move to sprint
+    "walk_speed_threshold": 0.01,    # Minimum movement to stay walking
+    "speed_buffer_frames": 10,       # Smooths out the "jitter" of hand movement
 
     # --- HEAD TRACKING ---
     "head_turn_thresh_x": 0.04,
@@ -122,6 +124,9 @@ _last_scroll_time = 0.0
 
 # Sprinting
 _is_sprinting = False
+_last_lw_pos = None
+_last_rw_pos = None
+_hand_speed_history = []
 _sprint_buffer = 0
 _was_sprinting_last_frame = False
 
@@ -374,18 +379,28 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             prev_hip_y = avg_hip_y
 
             # --- 7. SPRINTING LOGIC ---
-            l_knee, r_knee = lm[25], lm[26]
-            left_leg_lift = l_knee.y - lh.y
-            right_leg_lift = r_knee.y - rh.y
+            current_lw_pos = (lw.x, lw.y)
+            current_rw_pos = (rw.x, rw.y)
+            
+            hand_speed = 0.0
+            # global _last_lw_pos, _last_rw_pos # Ensure these are accessible
+            if _last_lw_pos and _last_rw_pos:
+                l_dist = math.dist(current_lw_pos, _last_lw_pos)
+                r_dist = math.dist(current_rw_pos, _last_rw_pos)
+                hand_speed = (l_dist + r_dist) / 2.0
+            
+            _last_lw_pos = current_lw_pos
+            _last_rw_pos = current_rw_pos
 
-            if left_leg_lift < CONFIG["leg_sprint_threshold"] or right_leg_lift < CONFIG["leg_sprint_threshold"]:
+            _hand_speed_history.append(hand_speed)
+            if len(_hand_speed_history) > 10:
+                _hand_speed_history.pop(0)
+            avg_speed = sum(_hand_speed_history) / len(_hand_speed_history)
+
+            if avg_speed > CONFIG["sprint_speed_threshold"]:
                 _is_sprinting = True
-                _sprint_buffer = CONFIG["sprint_release_frames"]
-            else:
-                if _sprint_buffer > 0:
-                    _sprint_buffer -= 1
-                else:
-                    _is_sprinting = False
+            elif avg_speed < CONFIG["walk_speed_threshold"]:
+                _is_sprinting = False
 
             # --- 8. KEYBOARD EXECUTION (RUN/SPRINT) ---
             # If running logic says GO, check Sprinting logic
@@ -448,15 +463,21 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             col = (0, 255, 255) if (_running_holding and _is_sprinting) else ((0, 255, 0) if _running_holding else (0, 0, 255))
             cv2.putText(frame, f"MODE: {status_text}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, col, 2)
 
-            # Sprint Bar
-            current_lift = min(left_leg_lift, right_leg_lift)
-            target = CONFIG["leg_sprint_threshold"]
-            # Background
+            # --- NEW SPRINT SPEED METER ---
+            target_speed = CONFIG["sprint_speed_threshold"]
+            
+            # Draw background box (Dark Grey)
             cv2.rectangle(frame, (w_px - 40, 300), (w_px - 20, 500), (50, 50, 50), -1)
-            # Fill
-            fill_pct = np.clip((0.4 - current_lift) / (0.4 - target), 0, 1)
-            bar_color = (0, 255, 255) if _is_sprinting else (100, 100, 100)
-            cv2.rectangle(frame, (w_px - 40, 500), (w_px - 20, 500 - int(200 * fill_pct)), bar_color, -1)
+            
+            # Calculate fill based on hand speed (Multiplied by 1.5 so the bar feels full when you hit max speed)
+            speed_fill = np.clip(avg_speed / (target_speed * 1.5), 0, 1)
+            
+            # Color: Cyan if sprinting, Green if just moving
+            bar_color = (0, 255, 255) if _is_sprinting else (0, 255, 0)
+            
+            # Draw the actual bar
+            cv2.rectangle(frame, (w_px - 40, 500), (w_px - 20, 500 - int(200 * speed_fill)), bar_color, -1)
+            cv2.putText(frame, "SPEED", (w_px - 60, 520), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
             
             # Click Feedback
             if now < _left_feedback_timer: cv2.putText(frame, _left_feedback_text, (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
