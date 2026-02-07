@@ -3,6 +3,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 import numpy as np
+import math
 from collections import deque
 import pyautogui
 import time
@@ -15,7 +16,10 @@ CONFIG = {
     "left_up": 0.50,   # normalized Y threshold for LEFT wrist
     "right_up": 0.50,  # normalized Y threshold for RIGHT wrist
 
-    "start_switch_window_s": 1.0,  # both hands must cross within this window to start running
+    # Run Detection Tuning
+    "switches_required": 3,        # how many up/down switches per hand required to start running
+    "start_switch_window_s": 0.8,  # both hands' last switches must be within this window to trigger
+    "switch_count_reset_s": 1.2,   # if no switches occur for this long, reset per-hand counters
     "stop_no_switch_s": 2.0,       # stop running if no crossings for this long
 
     # Stop if BOTH hands have effectively no movement for this long
@@ -39,6 +43,10 @@ CONFIG = {
     # --- Click vs Hold Sensitivity ---
     "raise_threshold": 0.15,      # How much higher wrist must be than shoulder
     "hold_threshold_s": 0.3,      # Seconds to wait before converting a Click into a Hold
+    
+    # --- Emergency Stop ---
+    "arm_straight_tol_deg": 10,   # Angle tolerance for straight arms
+    "insta_stop_block_s": 2.0,    # How long to block inputs after emergency stop
 }
 # ====================================================================
 
@@ -99,6 +107,9 @@ _last_left_switch_time = None
 _last_right_switch_time = None
 _last_left_above = None
 _last_right_above = None
+_left_switch_count = 0
+_right_switch_count = 0
+_insta_stop_until = 0.0
 
 # ---- MOVEMENT STATE ----
 _last_left_pos = None
@@ -141,14 +152,23 @@ def _detect_fist(hand_landmarks) -> bool:
 
 def _update_single_line_switch(current_above, last_above, which, now):
     global _last_left_switch_time, _last_right_switch_time, _last_any_switch_time
+    global _left_switch_count, _right_switch_count
+    
     if last_above is None:
         return current_above
     if current_above != last_above:
         if which == "left":
             _last_left_switch_time = now
+            _left_switch_count += 1
         else:
             _last_right_switch_time = now
+            _right_switch_count += 1
+        
         _last_any_switch_time = now
+        
+        if CONFIG["debug_print"]:
+            print(f"[debug] {which} switch! L:{_left_switch_count} R:{_right_switch_count}")
+            
     return current_above
 
 
@@ -177,6 +197,27 @@ def _check_no_movement(left_y, right_y, now) -> bool:
     _last_right_pos = right_y
     return (now - _last_move_time) >= CONFIG["no_move_timeout_s"]
 
+def _elbow_angle_deg(shoulder, elbow, wrist) -> float:
+    """Return angle at the elbow in degrees between shoulder->elbow and wrist->elbow."""
+    v1 = np.array([shoulder.x - elbow.x, shoulder.y - elbow.y], dtype=float)
+    v2 = np.array([wrist.x - elbow.x, wrist.y - elbow.y], dtype=float)
+    norm = np.linalg.norm(v1) * np.linalg.norm(v2)
+    if norm == 0:
+        return 0.0
+    cosv = np.clip(np.dot(v1, v2) / norm, -1.0, 1.0)
+    return math.degrees(math.acos(cosv))
+
+def _safe_set_key(key: str, pressed: bool, now: float = None):
+    """Wrapper around set_key that blocks presses during insta-stop cooldown."""
+    global _insta_stop_until
+    if now is None:
+        now = time.time()
+    if pressed and now < _insta_stop_until:
+        return
+    try:
+        set_key(key, pressed)
+    except Exception:
+        pass
 
 # =========================== MAIN LOOP ===========================
 
@@ -271,6 +312,32 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             elif is_tpose:
                 body_action = "T-Pose"
             prev_hip_y = avg_hip_y
+            
+            # --- EMERGENCY STOP (From resolved conflict) ---
+            # If both arms are straight and down, stop everything
+            left_elbow = landmarks[13]
+            right_elbow = landmarks[14]
+            left_elbow_ang = _elbow_angle_deg(ls, left_elbow, left_wrist)
+            right_elbow_ang = _elbow_angle_deg(rs, right_elbow, right_wrist)
+            tol = CONFIG.get("arm_straight_tol_deg", 10)
+            left_wrist_down = left_wrist.y > ls.y
+            right_wrist_down = right_wrist.y > rs.y
+            
+            if (left_elbow_ang >= (180 - tol) and right_elbow_ang >= (180 - tol)
+                    and left_wrist_down and right_wrist_down):
+                now_stop = time.time()
+                release_all()
+                if _left_is_holding:
+                    pyautogui.mouseUp(button='left')
+                    _left_is_holding = False
+                if _right_is_holding:
+                    pyautogui.mouseUp(button='right')
+                    _right_is_holding = False
+                _running_holding = False
+                _insta_stop_until = now_stop + CONFIG.get("insta_stop_block_s", 2.0)
+                if CONFIG.get("debug_print"):
+                    print(f"EMERGENCY STOP - Blocked until {_insta_stop_until}")
+
 
             # --- RUNNING VIA WRIST CROSSINGS ---
             now = time.time()
@@ -290,17 +357,32 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
 
             _last_left_above = _update_single_line_switch(left_above, _last_left_above, "left", now)
             _last_right_above = _update_single_line_switch(right_above, _last_right_above, "right", now)
+            
+            # Reset switch counts if too slow (from resolved conflict)
+            reset_after = CONFIG.get("switch_count_reset_s", 1.2)
+            if _last_any_switch_time and (now - _last_any_switch_time) > reset_after:
+                _left_switch_count = 0
+                _right_switch_count = 0
 
             start_window = CONFIG["start_switch_window_s"]
+            required = CONFIG.get("switches_required", 3)
             start_condition = False
-            if _last_left_switch_time is not None and _last_right_switch_time is not None:
-                tmax = max(_last_left_switch_time, _last_right_switch_time)
-                tmin = min(_last_left_switch_time, _last_right_switch_time)
-                if (tmax - tmin) <= start_window and (now - tmax) <= start_window:
-                    start_condition = True
+            
+            # Check if we have enough switches and they happened recently
+            if _left_switch_count >= required and _right_switch_count >= required:
+                if _last_left_switch_time is not None and _last_right_switch_time is not None:
+                    tmax = max(_last_left_switch_time, _last_right_switch_time)
+                    tmin = min(_last_left_switch_time, _last_right_switch_time)
+                    if (tmax - tmin) <= start_window and (now - tmax) <= start_window:
+                        start_condition = True
 
             if start_condition and not _running_holding:
-                _running_holding = True
+                # Only start if not in emergency stop cooldown
+                if now >= _insta_stop_until:
+                    _running_holding = True
+                    _left_switch_count = 0
+                    _right_switch_count = 0
+            
             if _running_holding and _last_any_switch_time is not None:
                 if (now - _last_any_switch_time) >= CONFIG["stop_no_switch_s"]:
                     _running_holding = False
@@ -312,6 +394,7 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
             # =================== CLICK vs HOLD LOGIC ===================
+            # Using Raise Hand Logic (HEAD version)
             raise_thresh = CONFIG["raise_threshold"]
             hold_time = CONFIG["hold_threshold_s"]
             
@@ -322,26 +405,24 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             # --- LEFT HAND LOGIC ---
             if left_is_raised:
                 if not _prev_left_raised:
-                    # Rising Edge: Start Timer
                     _left_raise_start_time = now
                 else:
                     # Sustained: Check for Hold
                     if (now - _left_raise_start_time > hold_time) and not _left_is_holding:
-                        pyautogui.mouseDown(button='left')
-                        _left_is_holding = True
-                        if CONFIG["debug_print"]: print("LEFT START HOLD")
+                        if now >= _insta_stop_until:
+                            pyautogui.mouseDown(button='left')
+                            _left_is_holding = True
+                            if CONFIG["debug_print"]: print("LEFT START HOLD")
             else:
-                # Falling Edge (was up, now down)
                 if _prev_left_raised:
                     if _left_is_holding:
-                        # If we were holding, release
                         pyautogui.mouseUp(button='left')
                         _left_is_holding = False
                         if CONFIG["debug_print"]: print("LEFT END HOLD")
                     else:
-                        # If we weren't holding yet, it was a quick Click
-                        pyautogui.click(button='left')
-                        if CONFIG["debug_print"]: print("LEFT CLICK")
+                        if now >= _insta_stop_until:
+                            pyautogui.click(button='left')
+                            if CONFIG["debug_print"]: print("LEFT CLICK")
 
             # --- RIGHT HAND LOGIC ---
             if right_is_raised:
@@ -349,9 +430,10 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                     _right_raise_start_time = now
                 else:
                     if (now - _right_raise_start_time > hold_time) and not _right_is_holding:
-                        pyautogui.mouseDown(button='right')
-                        _right_is_holding = True
-                        if CONFIG["debug_print"]: print("RIGHT START HOLD")
+                        if now >= _insta_stop_until:
+                            pyautogui.mouseDown(button='right')
+                            _right_is_holding = True
+                            if CONFIG["debug_print"]: print("RIGHT START HOLD")
             else:
                 if _prev_right_raised:
                     if _right_is_holding:
@@ -359,8 +441,9 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                         _right_is_holding = False
                         if CONFIG["debug_print"]: print("RIGHT END HOLD")
                     else:
-                        pyautogui.click(button='right')
-                        if CONFIG["debug_print"]: print("RIGHT CLICK")
+                        if now >= _insta_stop_until:
+                            pyautogui.click(button='right')
+                            if CONFIG["debug_print"]: print("RIGHT CLICK")
 
             # Update State
             _prev_left_raised = left_is_raised
@@ -379,7 +462,8 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             # ==========================================================
 
         # ---------------- KEYBOARD OUTPUT ----------------
-        set_key(CONFIG["running_key"], _running_holding)
+        # Use safe set key to respect emergency stop
+        _safe_set_key(CONFIG["running_key"], _running_holding, now=now)
 
         if body_action == "T-Pose" and prev_action != "T-Pose":
             tap(CONFIG["tpose_key"])
