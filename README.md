@@ -35,4 +35,13 @@ fix error in the pyinput thing that causes crashes
 
 comment out old code like the mouse pointing code.
 
+multiplayer set up an aternos server or something get judges to fight each other.
+
+inventory access
+
+
+tune some params for head movement.
+
+Create a unified file that runs pyton file camera copy and everything in one file 
+
 

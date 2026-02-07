@@ -7,8 +7,6 @@ import math
 import time
 from key_emulator import set_key, release_all
 from pynput.mouse import Button, Controller
-import threading
-import mouse_control
 
 # --- MAC MOUSE CONTROLLER ---
 mouse = Controller()
@@ -35,22 +33,10 @@ CONFIG = {
     
     # CHANGED: You must pump both hands within 0.3s to start. 
     # This prevents accidental running when just reaching for clicks.
-    "start_switch_window_s": 0.3, 
+    "start_switch_window_s": 0.3,  
     
     # CHANGED: Reset counter faster so old movements don't linger
     "switch_count_reset_s": 0.5,
-
-<<<<<<< HEAD
-    # tiff added for sprinting
-    "leg_sprint_threshold": 0.25, # Vertical distance between hip and knee
-    "sprint_release_frames": 15,  # Buffer to keep sprinting active while legs switch
-=======
-    # --- Head Tracking Config ---
-    "head_turn_thresh_x": 0.04,
-    "head_look_thresh_y": 0.03,
-    "head_smooth_alpha": 0.5,
-    "calib_frames_needed": 30,
->>>>>>> 01babea57894aa69785c6642c7fb29b5e884d3e8
 }
 # ====================================================================
 
@@ -127,73 +113,6 @@ _right_feedback_timer = 0.0
 _overlay_msg = ""
 _overlay_timer = 0.0
 
-<<<<<<< HEAD
-#sprinting state 
-_is_sprinting = False
-_sprint_buffer = 0
-_was_sprinting_last_frame = False
-=======
-
-
-# Head Tracking Calibration
-calib_count = 0
-nose_x_samples = []
-nose_y_samples = []
-shoulder_mid_x_samples = []
-shoulder_mid_y_samples = []
-nose_minus_eye_y_samples = []
-
-# Head Tracking Runtime
-base_nose_x = 0.0
-base_nose_y = 0.0
-base_sh_x = 0.0
-base_sh_y = 0.0
-base_nose_minus_eye_y = 0.0
-smooth_head_x = 0.0
-smooth_head_y = 0.0
-
-
-# Previous head action to detect transitions
-_prev_head_action = None
-
-# Background worker control for continuous head-look actions
-_desired_head_action = None
-_desired_head_action = None
-_head_thread_stop = threading.Event()
-_head_thread = None
-
-
-
-
-def _head_action_worker():
-    """
-    Background worker: Monitors _desired_head_action.
-    Manages the persistent AppleScript process.
-    """
-    last_action = None
-
-    while not _head_thread_stop.is_set():
-        current_action = _desired_head_action
-        
-        # Only act if the desired action has CHANGED
-        if current_action != last_action:
-            if current_action == "Turn Right":
-                mouse_control.start_left()
-            elif current_action == "Turn Left":
-                mouse_control.start_right()
-            else:
-                # If neutral, forward, up, or down, stop lateral movement
-                mouse_control.stop_turning()
-            
-            last_action = current_action
-
-        # Check less frequently since we don't need to spam commands
-        time.sleep(0.01)
-
-    # Cleanup on exit
-    mouse_control.stop_turning()
->>>>>>> 01babea57894aa69785c6642c7fb29b5e884d3e8
-
 # Helpers
 def _update_switch(curr, last, which, now):
     global _last_left_switch_time, _last_right_switch_time, _last_any_switch_time
@@ -214,9 +133,6 @@ def _safe_set_key(key, pressed, now):
     try: set_key(key, pressed)
     except: pass
 
-
-_head_thread = threading.Thread(target=_head_action_worker, daemon=True)
-_head_thread.start()
 # =========================== MAIN LOOP ===========================
 with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
      HandLandmarker.create_from_options(hand_options) as hand_landmarker:
@@ -226,13 +142,9 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
     print("  - STOP RUN: Drop hands below Waist.")
 
     while cap.isOpened():
-        head_action = "No pose"
         ret, frame = cap.read()
         if not ret: break
         
-        left_leg_lift = 1.0 
-        right_leg_lift = 1.0
-
         frame = cv2.flip(frame, 1)
         h, w_px = frame.shape[:2]
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -250,56 +162,7 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             ls, rs = lm[11], lm[12]
             lw, rw = lm[15], lm[16]
             lh, rh = lm[23], lm[24] # Hips
-
-
-            # --- HEAD TRACKING ---
-            nose = lm[0]
-            shoulder_mid_x = (ls.x + rs.x) / 2.0
-            shoulder_mid_y = (ls.y + rs.y) / 2.0
-            eye_mid_y = (left_eye.y + right_eye.y) / 2.0
-
-            if calib_count < CONFIG["calib_frames_needed"]:
-                nose_x_samples.append(nose.x)
-                nose_y_samples.append(nose.y)
-                shoulder_mid_x_samples.append(shoulder_mid_x)
-                shoulder_mid_y_samples.append(shoulder_mid_y)
-                nose_minus_eye_y_samples.append(nose.y - eye_mid_y)
-                calib_count += 1
-                head_action = f"Calibrating {calib_count}/{CONFIG['calib_frames_needed']}"
-            else:
-                if calib_count == CONFIG["calib_frames_needed"]:
-                    base_nose_x = float(np.mean(nose_x_samples))
-                    base_nose_y = float(np.mean(nose_y_samples))
-                    base_sh_x = float(np.mean(shoulder_mid_x_samples))
-                    base_sh_y = float(np.mean(shoulder_mid_y_samples))
-                    base_nose_minus_eye_y = float(np.mean(nose_minus_eye_y_samples))
-                    calib_count += 1
-
-                rel_x = (nose.x - shoulder_mid_x) - (base_nose_x - base_sh_x)
-                rel_y = (nose.y - eye_mid_y) - base_nose_minus_eye_y
-
-                alpha = CONFIG["head_smooth_alpha"]
-                smooth_head_x = alpha * smooth_head_x + (1 - alpha) * rel_x
-                smooth_head_y = alpha * smooth_head_y + (1 - alpha) * rel_y
-
-                if smooth_head_y < -CONFIG["head_look_thresh_y"]: head_action = "Look Up"
-                elif smooth_head_y > CONFIG["head_look_thresh_y"]: head_action = "Look Down"
-                elif smooth_head_x > CONFIG["head_turn_thresh_x"]: head_action = "Turn Left"
-                elif smooth_head_x < -CONFIG["head_turn_thresh_x"]: head_action = "Turn Right"
-                else: head_action = "Forward"
             
-
-
-            # Update desired head action for the background worker (continuous behavior)
-            if head_action == "Turn Left":
-                _desired_head_action = "Turn Left"
-            elif head_action == "Turn Right":
-                _desired_head_action = "Turn Right"
-            else:
-                _desired_head_action = None
-            _prev_head_action = head_action
-
-
             # --- CALCULATE THRESHOLDS ---
             start_thresh_y = ((ls.y + rs.y) / 2.0) + CONFIG["run_start_offset"]
             stop_thresh_y = ((lh.y + rh.y) / 2.0) + CONFIG["run_stop_offset"]
@@ -432,21 +295,6 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             
             prev_hip_y = avg_hip_y
 
-           # --- SPRINTING VIA LEG MOVEMENT ---
-            l_hip, r_hip = lm[23], lm[24]
-            l_knee, r_knee = lm[25], lm[26]
-            left_leg_lift = l_knee.y - l_hip.y
-            right_leg_lift = r_knee.y - r_hip.y
-
-            if left_leg_lift < CONFIG["leg_sprint_threshold"] or right_leg_lift < CONFIG["leg_sprint_threshold"]:
-                _is_sprinting = True
-                _sprint_buffer = CONFIG["sprint_release_frames"]
-            else:
-                if _sprint_buffer > 0:
-                    _sprint_buffer -= 1
-                else:
-                    _is_sprinting = False
-
             # --- VISUALS ---
             if now < _left_feedback_timer:
                 cv2.putText(frame, _left_feedback_text, (50, 250), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
@@ -463,63 +311,14 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                 pct = min(1.0, (now - _right_raise_start_time)/hold_time)
                 cv2.rectangle(frame, (w_px-150, 200), (w_px-150+int(100*pct), 210), (0,255,255), -1)
 
-        # PASTE THE NEW KEYBOARD & UI LOGIC BLOCK STARTING HERE
-        from key_emulator import key_down, key_up, tap
-
-        # 1. Determine the status and color for the UI
-        if _running_holding:
-            if _is_sprinting:
-                status = "SPRINTING"
-                col = (0, 255, 255) 
-            else:
-                status = "WALKING"
-                col = (0, 255, 0)   
-        else:
-            status = "STOPPED"
-            col = (0, 0, 255)       
-        # 2. Execute Keyboard Actions
-        wants_to_sprint = _running_holding and _is_sprinting
-        if wants_to_sprint:
-            if not _was_sprinting_last_frame:
-                key_up(CONFIG["running_key"])    
-                time.sleep(0.02)
-                tap(CONFIG["running_key"], 0.05) 
-                time.sleep(0.05)
-                key_down(CONFIG["running_key"])  
-                _was_sprinting_last_frame = True
-            else:
-                set_key(CONFIG["running_key"], True)
-        elif _running_holding:
-            set_key(CONFIG["running_key"], True)
-            _was_sprinting_last_frame = False
-        else:
-            set_key(CONFIG["running_key"], False)
-            _was_sprinting_last_frame = False
-
-        # 3. Draw the Sprint Meter
-        current_lift = min(left_leg_lift, right_leg_lift)
-        target = CONFIG["leg_sprint_threshold"]
-        cv2.rectangle(frame, (w_px - 40, 300), (w_px - 20, 500), (50, 50, 50), -1)
-        fill_pct = np.clip((0.4 - current_lift) / (0.4 - target), 0, 1)
-        bar_color = (0, 255, 255) if _is_sprinting else (150, 150, 150)
-        cv2.rectangle(frame, (w_px - 40, 500), (w_px - 20, 500 - int(200 * fill_pct)), bar_color, -1)
+        _safe_set_key(CONFIG["running_key"], _running_holding, now)
         
-        # 4. Final Text Overlay
+        status = "RUNNING" if _running_holding else "STOPPED"
+        col = (0, 255, 0) if _running_holding else (0, 0, 255)
         cv2.putText(frame, f"Mode: {status}", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, col, 2)
-        set_key("shift", False)
-
+        
         cv2.imshow('Action Recognition', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'): break
-
-
-
-_head_thread_stop.set()
-if _head_thread is not None:
-    try:
-        _head_thread.join(timeout=1.0)
-    except Exception:
-        pass
-
 
 cap.release()
 release_all()
