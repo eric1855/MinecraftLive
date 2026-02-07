@@ -13,10 +13,17 @@ from key_emulator import set_key, release_all, tap
 CONFIG = {
     # --- Running via SINGLE-LINE wrist crossings (NEW) ---
     "running_key": "w",
-    "left_up": 0.50,   # normalized Y threshold for LEFT wrist (15)
-    "right_up": 0.50,  # normalized Y threshold for RIGHT wrist (16)
+    # single horizontal run line (normalized Y)
+    "run_line": 0.62,
 
-    "start_switch_window_s": 1.0,  # both hands must cross within this window to start running
+    # how many up/down switches per hand required to start running
+    "switches_required": 3,
+
+    # both hands' last switches must be within this window to trigger
+    "start_switch_window_s": 0.8,
+
+    # if no switches occur for this long, reset per-hand counters
+    "switch_count_reset_s": 1.2,
     "stop_no_switch_s": 2.0,       # stop running if no crossings for this long
 
     # Stop if BOTH hands have effectively no movement for this long
@@ -53,6 +60,8 @@ CONFIG = {
     "click_low_margin": 0.08,
     # Angle tolerance (degrees) used to detect fully straight arms (near 180°)
     "arm_straight_tol_deg": 10,
+    # After an insta-stop, block any new key/mouse presses for this many seconds
+    "insta_stop_block_s": 2.0,
 }
 # ====================================================================
 
@@ -115,6 +124,8 @@ _last_left_switch_time = None
 _last_right_switch_time = None
 _last_left_above = None
 _last_right_above = None
+_left_switch_count = 0
+_right_switch_count = 0
 
 # ---- NEW: movement tracking for "still hands stop" ----
 _last_left_pos = None
@@ -122,10 +133,13 @@ _last_right_pos = None
 _last_move_time = None
 _last_left_move_time = None
 _last_right_move_time = None
+_last_left_move_time = None
+_last_right_move_time = None
 
 # Click hold state
 _left_click_holding = False
 _right_click_holding = False
+_insta_stop_until = 0.0
 
 # Hand mouse control tuning
 HAND_DEADZONE = 0.12  # normalized half-size of central dead zone (0.0-0.5)
@@ -166,13 +180,17 @@ def _update_single_line_switch(current_above, last_above, which, now):
     if current_above != last_above:
         if which == "left":
             _last_left_switch_time = now
+            global _left_switch_count
+            _left_switch_count += 1
         else:
             _last_right_switch_time = now
+            global _right_switch_count
+            _right_switch_count += 1
 
         _last_any_switch_time = now
 
         if CONFIG["debug_print"]:
-            print(f"[debug] {which} crossed line -> switch at {now:.3f}")
+            print(f"[debug] {which} crossed line -> switch at {now:.3f} (Lcount={_left_switch_count} Rcount={_right_switch_count})")
 
     return current_above
 
@@ -220,6 +238,21 @@ def _elbow_angle_deg(shoulder, elbow, wrist) -> float:
         return 0.0
     cosv = np.clip(np.dot(v1, v2) / norm, -1.0, 1.0)
     return math.degrees(math.acos(cosv))
+
+
+def _safe_set_key(key: str, pressed: bool, now: float = None):
+    """Wrapper around set_key that blocks presses during insta-stop cooldown."""
+    global _insta_stop_until
+    if now is None:
+        now = time.time()
+    if pressed and now < _insta_stop_until:
+        if CONFIG.get("debug_print"):
+            print(f"[debug] blocked set_key({key}, True) until {_insta_stop_until}")
+        return
+    try:
+        set_key(key, pressed)
+    except Exception:
+        pass
 
 
 # =========================== MAIN LOOP ===========================
@@ -337,7 +370,8 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             right_wrist_down = right_wrist.y > rs.y
             if (left_elbow_ang >= (180 - tol) and right_elbow_ang >= (180 - tol)
                     and left_wrist_down and right_wrist_down):
-                # Immediately stop all inputs
+                # Immediately stop all inputs and block re-presses briefly
+                now_stop = time.time()
                 release_all()
                 if _left_click_holding:
                     try: pyautogui.mouseUp(button='left')
@@ -348,28 +382,27 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                     except Exception: pass
                     _right_click_holding = False
                 _running_holding = False
-                set_key(CONFIG["running_key"], False)
+                # set insta-stop cooldown
+                _insta_stop_until = now_stop + CONFIG.get("insta_stop_block_s", 2.0)
+                _safe_set_key(CONFIG["running_key"], False, now=now_stop)
                 if CONFIG.get("debug_print"):
-                    print(f"[debug] Emergency stop: arms straight (L={left_elbow_ang:.1f}, R={right_elbow_ang:.1f}) and down -> released all")
+                    print(f"[debug] Emergency stop: arms straight (L={left_elbow_ang:.1f}, R={right_elbow_ang:.1f}) and down -> released all; blocked until {_insta_stop_until:.3f}")
 
             # --- 3) NEW RUNNING VIA SINGLE-LINE CROSSINGS ---
             now = time.time()
 
-            left_line = CONFIG["left_up"]
-            right_line = CONFIG["right_up"]
+            run_line = CONFIG.get("run_line", 0.62)
 
-            # Draw ONLY the upper lines
+            # Draw the single run line
             if CONFIG["draw_zone_lines"]:
-                y_left = int(left_line * h)
-                y_right = int(right_line * h)
-                cv2.line(frame, (0, y_left), (w, y_left), (0, 255, 255), 2)
-                cv2.line(frame, (0, y_right), (w, y_right), (255, 255, 0), 2)
+                y_run = int(run_line * h)
+                cv2.line(frame, (0, y_run), (w, y_run), (0, 255, 255), 2)
 
             left_wrist_y = left_wrist.y
             right_wrist_y = right_wrist.y
 
-            left_above = left_wrist_y < left_line
-            right_above = right_wrist_y < right_line
+            left_above = left_wrist_y < run_line
+            right_above = right_wrist_y < run_line
 
             # Stop if both hands are still for 0.5s
             hands_still = _check_no_movement(left_wrist_y, right_wrist_y, now)
@@ -378,23 +411,42 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                 if CONFIG["debug_print"]:
                     print("[debug] STOP running due to no movement")
 
-            # Detect crossings
+            # Detect crossings (update per-hand counters)
             _last_left_above = _update_single_line_switch(left_above, _last_left_above, "left", now)
             _last_right_above = _update_single_line_switch(right_above, _last_right_above, "right", now)
 
-            # Start condition: both hands crossed within window
+            # If no switches for a while, reset the counters to avoid stale counts
+            reset_after = CONFIG.get("switch_count_reset_s", 1.2)
+            if _last_any_switch_time and (now - _last_any_switch_time) > reset_after:
+                _left_switch_count = 0
+                _right_switch_count = 0
+                if CONFIG.get("debug_print"):
+                    print(f"[debug] reset switch counts due to inactivity (>{reset_after}s)")
+
+            # Start condition: require per-hand switch counts
+            required = CONFIG.get("switches_required", 3)
             start_window = CONFIG["start_switch_window_s"]
             start_condition = False
-            if _last_left_switch_time is not None and _last_right_switch_time is not None:
-                tmax = max(_last_left_switch_time, _last_right_switch_time)
-                tmin = min(_last_left_switch_time, _last_right_switch_time)
-                if (tmax - tmin) <= start_window and (now - tmax) <= start_window:
-                    start_condition = True
+            if _left_switch_count >= required and _right_switch_count >= required:
+                # ensure the most recent switches for both hands were near each other
+                if _last_left_switch_time is not None and _last_right_switch_time is not None:
+                    tmax = max(_last_left_switch_time, _last_right_switch_time)
+                    tmin = min(_last_left_switch_time, _last_right_switch_time)
+                    if (tmax - tmin) <= start_window and (now - tmax) <= start_window:
+                        start_condition = True
 
             if start_condition and not _running_holding:
-                _running_holding = True
-                if CONFIG["debug_print"]:
-                    print("[debug] START running (two-hand cross window satisfied)")
+                # respect insta-stop cooldown
+                if now >= _insta_stop_until:
+                    _running_holding = True
+                    # reset switch counters after starting
+                    _left_switch_count = 0
+                    _right_switch_count = 0
+                    if CONFIG.get("debug_print"):
+                        print(f"[debug] START running (counts reached {required} per hand)")
+                else:
+                    if CONFIG.get("debug_print"):
+                        print(f"[debug] start blocked until {_insta_stop_until}")
 
             # Stop condition: no crossings for too long
             if _running_holding and _last_any_switch_time is not None:
@@ -442,10 +494,15 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
 
             # Apply mouse down/up only on state changes
             if left_click_cond and not _left_click_holding:
-                pyautogui.mouseDown(button='left')
-                _left_click_holding = True
-                if CONFIG["debug_print"]:
-                    print("[debug] LEFT mouseDown (left above, right low+still)")
+                # Do not start clicks while insta-stop cooldown active
+                if now >= _insta_stop_until:
+                    pyautogui.mouseDown(button='left')
+                    _left_click_holding = True
+                    if CONFIG["debug_print"]:
+                        print("[debug] LEFT mouseDown (left above, right low+still)")
+                else:
+                    if CONFIG.get("debug_print"):
+                        print(f"[debug] LEFT click blocked until {_insta_stop_until}")
             if not left_click_cond and _left_click_holding:
                 pyautogui.mouseUp(button='left')
                 _left_click_holding = False
@@ -453,10 +510,15 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                     print("[debug] LEFT mouseUp")
 
             if right_click_cond and not _right_click_holding:
-                pyautogui.mouseDown(button='right')
-                _right_click_holding = True
-                if CONFIG["debug_print"]:
-                    print("[debug] RIGHT mouseDown (right above, left low+still)")
+                # Do not start clicks while insta-stop cooldown active
+                if now >= _insta_stop_until:
+                    pyautogui.mouseDown(button='right')
+                    _right_click_holding = True
+                    if CONFIG["debug_print"]:
+                        print("[debug] RIGHT mouseDown (right above, left low+still)")
+                else:
+                    if CONFIG.get("debug_print"):
+                        print(f"[debug] RIGHT click blocked until {_insta_stop_until}")
             if not right_click_cond and _right_click_holding:
                 pyautogui.mouseUp(button='right')
                 _right_click_holding = False
@@ -464,8 +526,8 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
                     print("[debug] RIGHT mouseUp")
 
         # ---------------- KEYBOARD INPUT HANDLING ----------------
-        # IMPORTANT: W is driven ONLY by _running_holding now
-        set_key(CONFIG["running_key"], _running_holding)
+        # IMPORTANT: W is driven ONLY by _running_holding now (use safe wrapper)
+        _safe_set_key(CONFIG["running_key"], _running_holding, now=time.time())
 
         if body_action == "T-Pose" and prev_action != "T-Pose":
             tap(CONFIG["tpose_key"])
