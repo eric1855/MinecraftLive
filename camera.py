@@ -6,6 +6,7 @@ import numpy as np
 import time
 import threading
 from pynput.mouse import Button, Controller
+import socket
 import math
 
 # Import all key emulator functions needed
@@ -14,6 +15,17 @@ from key_emulator import set_key, release_all, key_down, key_up, tap
 
 # --- MAC MOUSE CONTROLLER ---
 mouse = Controller()
+
+# --- PHONE GATE (UDP) ---
+PHONE_GATE_ADDR = ("127.0.0.1", 9876)
+_gate_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+def _set_phone_gate(enabled):
+    try:
+        msg = b"ENABLE" if enabled else b"DISABLE"
+        _gate_sock.sendto(msg, PHONE_GATE_ADDR)
+    except Exception:
+        pass
 
 # =========================== CONFIGURATION ===========================
 CONFIG = {
@@ -120,6 +132,7 @@ _right_feedback_timer = 0.0
 
 # Scrolling/Inventory
 prev_tpose = False
+_inventory_open = False
 _last_scroll_time = 0.0
 
 # Sprinting
@@ -309,13 +322,18 @@ with PoseLandmarker.create_from_options(pose_options) as pose_landmarker, \
             is_right_scroll = r_is_horizontal and r_is_extended and not r_click_active
 
             # --- 4. SCROLL & INVENTORY ---
-            if is_left_scroll and is_right_scroll:
+            new_tpose = is_left_scroll and is_right_scroll
+
+            if new_tpose:
                 if not prev_tpose:
                     _safe_set_key(CONFIG["inventory_key"], True, now)
                     time.sleep(0.05)
                     _safe_set_key(CONFIG["inventory_key"], False, now)
                     _overlay_msg = "INVENTORY"
                     _overlay_timer = now + 1.5
+                    # Toggle inventory state and gate
+                    _inventory_open = not _inventory_open
+                    _set_phone_gate(_inventory_open)
                 prev_tpose = True
             elif is_left_scroll:
                 prev_tpose = False

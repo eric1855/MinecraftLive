@@ -20,11 +20,37 @@ except ImportError:
 # --- CONFIGURATION ---
 HTTP_PORT = 8000
 WS_PORT = 8765
+GATE_PORT = 9876
 SENSITIVITY_X = 6.0
 SENSITIVITY_Y = 6.0
 SMOOTHING_FACTOR = 0.3
 
 mouse = Controller()
+_allow_phone_input = False
+_allow_lock = threading.Lock()
+
+def _set_phone_allowed(value: bool):
+    with _allow_lock:
+        global _allow_phone_input
+        _allow_phone_input = value
+
+def _get_phone_allowed():
+    with _allow_lock:
+        return _allow_phone_input
+
+def _gate_listener():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("127.0.0.1", GATE_PORT))
+    while True:
+        try:
+            data, _ = s.recvfrom(1024)
+            msg = data.decode("utf-8", errors="ignore").strip().upper()
+            if msg == "ENABLE":
+                _set_phone_allowed(True)
+            elif msg == "DISABLE":
+                _set_phone_allowed(False)
+        except Exception:
+            pass
 
 # --- HTML CLIENT ---
 HTML_TEMPLATE = """
@@ -117,14 +143,22 @@ HTML_TEMPLATE = """
         const aimText = document.getElementById('aim-text');
         
         let socket = null;
-        let aimActive = false;
+        let aimActive = true;
+        let reconnectTimer = null;
+        let reconnectDelayMs = 500;
+        const RECONNECT_MAX_MS = 5000;
 
         // Set the fix link URL
         fixLink.href = FIX_URL;
 
         function connect() {
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
             statusDiv.innerText = "Connecting to Mouse...";
-            
+            statusDiv.style.color = "#aaa";
+
             socket = new WebSocket(WS_URL);
             
             socket.onopen = () => {
@@ -132,6 +166,7 @@ HTML_TEMPLATE = """
                 statusDiv.style.color = "#4cd964";
                 fixLink.style.display = 'none';
                 aimText.style.display = 'block';
+                reconnectDelayMs = 500;
             };
 
             socket.onclose = () => {
@@ -140,11 +175,25 @@ HTML_TEMPLATE = """
                 // Show the fix link if we can't connect
                 fixLink.style.display = 'block';
                 aimText.style.display = 'none';
+                scheduleReconnect();
             };
 
             socket.onerror = (err) => {
                 console.error(err);
+                // Allow onclose to handle reconnect
             };
+        }
+
+        function scheduleReconnect() {
+            if (reconnectTimer) return;
+            const delay = reconnectDelayMs;
+            statusDiv.innerText = `Reconnecting in ${Math.ceil(delay / 1000)}s...`;
+            statusDiv.style.color = "#ffb300";
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                reconnectDelayMs = Math.min(RECONNECT_MAX_MS, reconnectDelayMs * 2);
+                connect();
+            }, delay);
         }
 
         function send(type, payload) {
@@ -160,12 +209,7 @@ HTML_TEMPLATE = """
 
         // --- TOUCH AREAS ---
         const aimZone = document.getElementById('aim-zone');
-        aimZone.addEventListener('touchstart', (e) => { 
-            // Don't trigger aim if tapping the fix link
-            if(e.target === fixLink) return;
-            e.preventDefault(); aimActive = true; aimZone.classList.add('active'); 
-        });
-        aimZone.addEventListener('touchend', (e) => { e.preventDefault(); aimActive = false; aimZone.classList.remove('active'); });
+        aimZone.classList.add('active');
 
         // --- BUTTONS ---
         const btnLeft = document.getElementById('btn-left');
@@ -234,10 +278,11 @@ async def start_ws():
     
     # State variables
     prev_a, prev_b = None, None
+    base_a, base_b = None, None
     velocity_x, velocity_y = 0.0, 0.0
 
     async def handler(websocket):
-        nonlocal prev_a, prev_b, velocity_x, velocity_y
+        nonlocal prev_a, prev_b, base_a, base_b, velocity_x, velocity_y
         print("Phone Connected to Mouse Server!")
         try:
             async for message in websocket:
@@ -246,12 +291,26 @@ async def start_ws():
                 data = msg.get('d')
 
                 if m_type == 'click':
+                    if not _get_phone_allowed():
+                        continue
                     btn = Button.left if data['b'] == 'left' else Button.right
                     if data['s'] == 'down': mouse.press(btn)
                     else: mouse.release(btn)
 
                 elif m_type == 'move':
+                    if not _get_phone_allowed():
+                        continue
                     curr_a, curr_b = data['a'], data['b']
+
+                    # Calibrate baseline on first reading
+                    if base_a is None or base_b is None:
+                        base_a, base_b = curr_a, curr_b
+                        prev_a, prev_b = curr_a, curr_b
+                        continue
+
+                    # Use baseline to remove constant drift
+                    curr_a -= base_a
+                    curr_b -= base_b
                     
                     if prev_a is not None:
                         da = curr_a - prev_a
@@ -260,6 +319,11 @@ async def start_ws():
                         # Fix wrapping
                         if da > 180: da -= 360
                         if da < -180: da += 360
+
+                        # Deadzone to avoid slow drift
+                        if abs(da) < 0.2 and abs(db) < 0.2:
+                            prev_a, prev_b = curr_a, curr_b
+                            continue
 
                         # Calculate Target
                         target_x = da * SENSITIVITY_X * -1
@@ -277,6 +341,8 @@ async def start_ws():
             pass
         finally:
             print("Phone Disconnected")
+            base_a, base_b = None, None
+            prev_a, prev_b = None, None
 
     # Use the serve method directly
     async with websockets.serve(handler, "0.0.0.0", WS_PORT, ssl=ssl_context):
@@ -289,6 +355,10 @@ if __name__ == "__main__":
         # Start HTTP in background thread
         t = threading.Thread(target=start_http, daemon=True)
         t.start()
+
+        # Start gate listener in background thread
+        g = threading.Thread(target=_gate_listener, daemon=True)
+        g.start()
         
         # Start WebSocket in main thread
         try: asyncio.run(start_ws())
