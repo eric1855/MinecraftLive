@@ -176,10 +176,8 @@ with PoseLandmarker.create_from_options(options) as landmarker:
             print(f"Tapping space key (CONFIG['jump_key']={CONFIG['jump_key']})")
             try:
                 tap(CONFIG["jump_key"])
-                print("Space tap sent successfully")
             except Exception as e:
-                print(f"Error tapping space: {e}")
-    
+                pass
         
         prev_action = action
 
