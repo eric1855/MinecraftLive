@@ -127,12 +127,10 @@ _right_feedback_timer = 0.0
 _overlay_msg = ""
 _overlay_timer = 0.0
 
-<<<<<<< HEAD
 #sprinting state 
 _is_sprinting = False
 _sprint_buffer = 0
 _was_sprinting_last_frame = False
-=======
 
 
 # Head Tracking Calibration
@@ -192,7 +190,6 @@ def _head_action_worker():
 
     # Cleanup on exit
     mouse_control.stop_turning()
->>>>>>> 01babea57894aa69785c6642c7fb29b5e884d3e8
 
 # Helpers
 def _update_switch(curr, last, which, now):
