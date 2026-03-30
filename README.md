@@ -1,3 +1,9 @@
+<p align="center">
+<a href="https://drive.google.com/file/d/104BanqN7PShnODy9gVDWJFy8xIF115ec/view?usp=sharing">
+<img src="https://img.shields.io/badge/🎬_Watch_Demo-4285F4?style=for-the-badge&logo=googledrive&logoColor=white"/>
+</a>
+</p>
+
 Instruction for running the phone hand control:
 
 ensure cert.pem is present
