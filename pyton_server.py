@@ -26,7 +26,7 @@ SENSITIVITY_Y = 6.0
 SMOOTHING_FACTOR = 0.3
 
 mouse = Controller()
-_allow_phone_input = False
+_allow_phone_input = True
 _allow_lock = threading.Lock()
 
 def _set_phone_allowed(value: bool):
